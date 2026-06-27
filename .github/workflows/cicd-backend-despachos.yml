@@ -1,6 +1,5 @@
-name: CI/CD Backend Despachos - SpringBoot
+name: CI/CD Backend Despachos - EKS Deploy
 
-# Se activa SOLO cuando hay push en la rama deploy
 on:
   push:
     branches:
@@ -11,48 +10,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── PASO 1: Descargar el código ──────────────────────
       - name: "1. Checkout del codigo"
         uses: actions/checkout@v4
 
-      # ── PASO 2: Login a Docker Hub ───────────────────────
-      - name: "2. Login a Docker Hub"
-        uses: docker/login-action@v3
+      - name: "2. Configurar credenciales AWS"
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      # ── PASO 3: Construir imagen Docker ──────────────────
-      - name: "3. Build de la imagen Docker"
+      - name: "3. Login a Amazon ECR"
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: "4. Build de la imagen Docker"
         run: |
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/backend-despachos:latest ./Springboot-API-REST-DESPACHO
+          docker build -t backend-despachos ./Springboot-API-REST-DESPACHO
 
-      # ── PASO 4: Subir imagen a Docker Hub ────────────────
-      - name: "4. Push imagen a Docker Hub"
+      - name: "5. Etiquetar imagen para ECR"
         run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/backend-despachos:latest
+          docker tag backend-despachos:latest ${{ secrets.ECR_REGISTRY }}/backend-despachos:latest
 
-      # ── PASO 5: Desplegar en EC2-App via SSH Jump ────────
-      - name: "5. Deploy en EC2-App via SSH Jump"
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host:           ${{ secrets.EC2_APP_HOST }}
-          username:       ${{ secrets.EC2_USER }}
-          key:            ${{ secrets.EC2_SSH_KEY }}
-          proxy_host:     ${{ secrets.EC2_BASTION_HOST }}
-          proxy_username: ${{ secrets.EC2_USER }}
-          proxy_key:      ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/backend-despachos:latest
-            docker stop backend-despachos || true
-            docker rm backend-despachos || true
-            docker run -d \
-              --name backend-despachos \
-              --restart always \
-              -p 8081:8081 \
-              -e SPRING_DATASOURCE_URL="jdbc:mysql://${{ secrets.DB_HOST }}:3306/despachos_db?useSSL=false&allowPublicKeyRetrieval=true" \
-              -e SPRING_DATASOURCE_USERNAME=appuser \
-              -e SPRING_DATASOURCE_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-              -e SPRING_JPA_HIBERNATE_DDL_AUTO=update \
-              -e SERVER_PORT=8081 \
-              ${{ secrets.DOCKERHUB_USERNAME }}/backend-despachos:latest
+      - name: "6. Push imagen a ECR"
+        run: |
+          docker push ${{ secrets.ECR_REGISTRY }}/backend-despachos:latest
+
+      - name: "7. Configurar kubectl"
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+
+      - name: "8. Deploy en EKS"
+        run: |
+          kubectl rollout restart deployment/backend-despachos -n innovatech
+          kubectl rollout status deployment/backend-despachos -n innovatech --timeout=180s
